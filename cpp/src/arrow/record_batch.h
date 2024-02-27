@@ -85,8 +85,11 @@ class ARROW_EXPORT RecordBatch {
   /// Create a Tensor object with shape (number of rows, number of columns) and
   /// strides (type size in bytes, type size in bytes * number of rows).
   /// Generated Tensor will have column-major layout.
+  ///
+  /// \param[in] null_to_nan if true, convert null to nan
+  /// \param[in] pool the memory pool to allocate the tensor
   Result<std::shared_ptr<Tensor>> ToTensor(
-      MemoryPool* pool = default_memory_pool()) const;
+      bool null_to_nan = false, MemoryPool* pool = default_memory_pool()) const;
 
   /// \brief Construct record batch from struct array
   ///

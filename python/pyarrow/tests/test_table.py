@@ -1074,7 +1074,7 @@ def test_recordbatch_to_tensor_null():
     arr2 = [10, 20, 30, 40, 50, 60, 70, None, 90]
     batch = pa.RecordBatch.from_arrays(
         [
-            pa.array(arr1, type=pa.float32()),
+            pa.array(arr1, type=pa.int32()),
             pa.array(arr2, type=pa.float32()),
         ], ["a", "b"]
     )
@@ -1083,6 +1083,17 @@ def test_recordbatch_to_tensor_null():
         match="Can only convert a RecordBatch with no nulls."
     ):
         batch.to_tensor()
+
+    result = batch.to_tensor(null_to_nan=True)
+
+    x = np.array([arr1, arr2], np.float64).transpose()
+    expected = pa.Tensor.from_numpy(x)
+
+    np.testing.assert_equal(result.to_numpy(), x)
+    assert result.size == 18
+    assert result.type == pa.float64()
+    assert result.shape == expected.shape
+    assert result.strides == expected.strides
 
 
 def test_recordbatch_to_tensor_empty():

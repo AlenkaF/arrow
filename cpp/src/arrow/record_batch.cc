@@ -249,12 +249,13 @@ Result<std::shared_ptr<StructArray>> RecordBatch::ToStructArray() const {
 }
 
 template <typename DataType>
-inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
+inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
+                                   bool null_to_nan) {
   using CType = typename arrow::TypeTraits<DataType>::CType;
   auto* out_values = reinterpret_cast<CType*>(out);
 
-  if (TypeTraits<DataType>::type_singleton() ==
-      batch.column(0)->type()) {  // If all columns are of same data type
+  if (TypeTraits<DataType>::type_singleton() == batch.column(0)->type() &&
+      !null_to_nan) {  // If all columns are of same data type
     // Loop through all of the columns
     for (int i = 0; i < batch.num_columns(); ++i) {
       const auto& arr = *batch.column(i);
@@ -276,35 +277,55 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
       for (int i = 0; i < arr.length(); ++i) {
         switch (arr.type_id()) {
           case Type::UINT8:
-            *out_values++ = static_cast<CType>(data->GetValues<uint8_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<uint8_t>(1)[i]);
             break;
           case Type::UINT16:
           case Type::HALF_FLOAT:
-            *out_values++ = static_cast<CType>(data->GetValues<uint16_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<uint16_t>(1)[i]);
             break;
           case Type::UINT32:
-            *out_values++ = static_cast<CType>(data->GetValues<uint32_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<uint32_t>(1)[i]);
             break;
           case Type::UINT64:
-            *out_values++ = static_cast<CType>(data->GetValues<uint64_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<uint64_t>(1)[i]);
             break;
           case Type::INT8:
-            *out_values++ = static_cast<CType>(data->GetValues<int8_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<int8_t>(1)[i]);
             break;
           case Type::INT16:
-            *out_values++ = static_cast<CType>(data->GetValues<int16_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<int16_t>(1)[i]);
             break;
           case Type::INT32:
-            *out_values++ = static_cast<CType>(data->GetValues<int32_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<int32_t>(1)[i]);
             break;
           case Type::INT64:
-            *out_values++ = static_cast<CType>(data->GetValues<int64_t>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<int64_t>(1)[i]);
             break;
           case Type::FLOAT:
-            *out_values++ = static_cast<CType>(data->GetValues<float>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<float>(1)[i]);
             break;
           case Type::DOUBLE:
-            *out_values++ = static_cast<CType>(data->GetValues<double>(1)[i]);
+            *out_values++ = arr.IsNull(i)
+                                ? static_cast<CType>(NAN)
+                                : static_cast<CType>(data->GetValues<double>(1)[i]);
             break;
           default:
             break;
@@ -314,7 +335,8 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
   }
 }
 
-Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
+Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
+                                                      MemoryPool* pool) const {
   if (num_columns() == 0) {
     return Status::TypeError(
         "Conversion to Tensor for RecordBatches without columns/schema is not "
@@ -322,7 +344,7 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   }
   // Check for no validity bitmap of each field
   for (int i = 0; i < num_columns(); ++i) {
-    if (column(i)->null_count() > 0) {
+    if (column(i)->null_count() > 0 && !null_to_nan) {
       return Status::TypeError("Can only convert a RecordBatch with no nulls.");
     }
   }
@@ -335,7 +357,7 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   }
   std::shared_ptr<Field> result_field = schema_->field(0);
   std::shared_ptr<DataType> result_type = result_field->type();
-  
+
   if (num_columns() > 1) {
     Field::MergeOptions options;
     options.promote_integer_to_float = true;
@@ -361,35 +383,35 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   // Copy data
   switch (result_type->id()) {
     case Type::UINT8:
-      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT16:
     case Type::HALF_FLOAT:
-      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT32:
-      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT64:
-      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT8:
-      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT16:
-      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT32:
-      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT64:
-      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::FLOAT:
-      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::DOUBLE:
-      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data(), null_to_nan);
       break;
     default:
       return Status::TypeError("DataType is not supported: ", result_type->ToString());
