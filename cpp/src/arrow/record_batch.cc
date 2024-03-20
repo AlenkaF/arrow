@@ -253,26 +253,45 @@ Result<std::shared_ptr<StructArray>> RecordBatch::ToStructArray() const {
     using T = typename TypeIdTraits<Type::type>::Type;                 \
     using CType_in = typename TypeTraits<T>::CType;                    \
     auto* in_values = batch.column(i)->data()->GetValues<CType_in>(1); \
-    for (int64_t i = 0; i < length; ++i) {                             \
+    for (int64_t j = 0; j < length; ++j) {                             \
       *out_values++ = static_cast<CType>(*in_values++);                \
     }                                                                  \
     break;                                                             \
   }
 
+#define TYPE_CASE_NULL(type)                                                         \
+  case Type::type: {                                                                 \
+    using T = typename TypeIdTraits<Type::type>::Type;                               \
+    using CType_in = typename TypeTraits<T>::CType;                                  \
+    auto* in_values = batch.column(i)->data()->GetValues<CType_in>(1);               \
+    for (int64_t j = 0; j < length; ++j) {                                           \
+      *out_values++ = batch.column(i)->IsNull(j) ? static_cast<CType>(NAN)           \
+                                                 : static_cast<CType>(in_values[j]); \
+    }                                                                                \
+    break;                                                                           \
+  }
+  }
+
 template <typename DataType>
-inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
+inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
+                                   bool null_to_nan) {
   using CType = typename arrow::TypeTraits<DataType>::CType;
   auto* out_values = reinterpret_cast<CType*>(out);
   int64_t length = batch.num_rows();
 
   for (int i = 0; i < batch.num_columns(); ++i) {
     // If the column is of the same type than resulting data type
-    if (TypeTraits<DataType>::type_singleton() == batch.column(i)->type()) {
+    // Applies only to columns with no missing values
+    if (TypeTraits<DataType>::type_singleton() == batch.column(i)->type() &&
+        batch.column(i)->null_count() == 0) {
       const auto* in_values = batch.column(i)->data()->GetValues<CType>(1);
 
       memcpy(out_values, in_values, sizeof(CType) * length);
       out_values += length;
-    } else {  // If the column is different type than resulting data type
+    }
+    // If the column is different type than resulting data type
+    // and has no missing values
+    else if (batch.column(i)->null_count() == 0) {
       switch (batch.column(i)->type_id()) {
         case Type::HALF_FLOAT: {
           auto* in_values = batch.column(i)->data()->GetValues<uint16_t>(1);
@@ -295,12 +314,39 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
           break;
       }
     }
+    // If the column is different type than resulting data type, has missing values
+    // and null_to_nan is set to true (checked in RecordBatch::ToTensor)
+    else {
+      switch (batch.column(i)->type_id()) {
+        case Type::HALF_FLOAT: {
+          auto* in_values = batch.column(i)->data()->GetValues<uint16_t>(1);
+          for (int64_t j = 0; j < length; ++j) {
+            *out_values++ = batch.column(i)->IsNull(j) ? static_cast<CType>(NAN)
+                                                       : static_cast<CType>(in_values[j]);
+          }
+          break;
+        }
+          TYPE_CASE_NULL(UINT8)
+          TYPE_CASE_NULL(UINT16)
+          TYPE_CASE_NULL(UINT32)
+          TYPE_CASE_NULL(UINT64)
+          TYPE_CASE_NULL(INT8)
+          TYPE_CASE_NULL(INT16)
+          TYPE_CASE_NULL(INT32)
+          TYPE_CASE_NULL(INT64)
+          TYPE_CASE_NULL(FLOAT)
+          TYPE_CASE_NULL(DOUBLE)
+        default:
+          break;
+      }
+    }
   }
 }
 
 #undef TYPE_CASE
 
-Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
+Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
+                                                      MemoryPool* pool) const {
   if (num_columns() == 0) {
     return Status::TypeError(
         "Conversion to Tensor for RecordBatches without columns/schema is not "
@@ -308,7 +354,7 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   }
   // Check for no validity bitmap of each field
   for (int i = 0; i < num_columns(); ++i) {
-    if (column(i)->null_count() > 0) {
+    if (column(i)->null_count() > 0 && !null_to_nan) {
       return Status::TypeError("Can only convert a RecordBatch with no nulls.");
     }
   }
@@ -321,12 +367,12 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   }
   std::shared_ptr<DataType> result_type = column(0)->type();
 
-  if (num_columns() > 1) {
-    Field::MergeOptions options;
-    options.promote_integer_to_float = true;
-    options.promote_integer_sign = true;
-    options.promote_numeric_width = true;
+  Field::MergeOptions options;
+  options.promote_integer_to_float = true;
+  options.promote_integer_sign = true;
+  options.promote_numeric_width = true;
 
+  if (num_columns() > 1) {
     for (int i = 1; i < num_columns(); ++i) {
       if (!is_integer(column(i)->type()->id()) && !is_floating(column(i)->type()->id())) {
         return Status::TypeError("DataType is not supported: ",
@@ -337,6 +383,12 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
     }
   }
 
+  // Check if result_type is signed or unsigned integer and null_to_nan is set to false
+  // Then all columns should be promoted to float type
+  if (is_integer(result_type->id()) && null_to_nan) {
+    ARROW_ASSIGN_OR_RAISE(result_type, MergeTypes(result_type, float16(), options));
+  }
+
   // Allocate memory
   ARROW_ASSIGN_OR_RAISE(
       std::shared_ptr<Buffer> result,
@@ -344,35 +396,35 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   // Copy data
   switch (result_type->id()) {
     case Type::UINT8:
-      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT16:
     case Type::HALF_FLOAT:
-      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT32:
-      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT64:
-      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT8:
-      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT16:
-      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT32:
-      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT64:
-      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::FLOAT:
-      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::DOUBLE:
-      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data(), null_to_nan);
       break;
     default:
       return Status::TypeError("DataType is not supported: ", result_type->ToString());
