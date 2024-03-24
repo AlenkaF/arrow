@@ -265,12 +265,19 @@ struct ConvertColumnsToTensorVisitor {
       using In = CTypeOrFloat16<T>;
       auto in_values = ArraySpan(in_data).GetSpan<In>(1, in_data.length);
 
-      if constexpr (std::is_same_v<In, Out>) {
-        memcpy(out_values, in_values.data(), in_values.size_bytes());
-        out_values += in_values.size();
+      if (in_data.null_count == 0) {
+        if constexpr (std::is_same_v<In, Out>) {
+          memcpy(out_values, in_values.data(), in_values.size_bytes());
+          out_values += in_values.size();
+        } else {
+          for (In in_value : in_values) {
+            *out_values++ = static_cast<Out>(in_value);
+          }
+        }
       } else {
-        for (In in_value : in_values) {
-          *out_values++ = static_cast<Out>(in_value);
+        for (int64_t i = 0; i < in_data.length; ++i) {
+          *out_values++ =
+              in_data.IsNull(i) ? static_cast<Out>(NAN) : static_cast<Out>(in_values[i]);
         }
       }
       return Status::OK();
@@ -280,7 +287,8 @@ struct ConvertColumnsToTensorVisitor {
 };
 
 template <typename DataType>
-inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
+inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
+                                   bool null_to_nan) {
   using CType = CTypeOrFloat16<DataType>;
   auto* out_values = reinterpret_cast<CType*>(out);
 
@@ -290,7 +298,8 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out) {
   }
 }
 
-Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
+Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
+                                                      MemoryPool* pool) const {
   if (num_columns() == 0) {
     return Status::TypeError(
         "Conversion to Tensor for RecordBatches without columns/schema is not "
@@ -298,7 +307,7 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   }
   // Check for no validity bitmap of each field
   for (int i = 0; i < num_columns(); ++i) {
-    if (column(i)->null_count() > 0) {
+    if (column(i)->null_count() > 0 && !null_to_nan) {
       return Status::TypeError("Can only convert a RecordBatch with no nulls.");
     }
   }
@@ -337,37 +346,37 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(MemoryPool* pool) const {
   // Copy data
   switch (result_type->id()) {
     case Type::UINT8:
-      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT16:
-      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT32:
-      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT64:
-      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT8:
-      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT16:
-      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT32:
-      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT64:
-      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data());
+      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::HALF_FLOAT:
-      ConvertColumnsToTensor<HalfFloatType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<HalfFloatType>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::FLOAT:
-      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data(), null_to_nan);
       break;
     case Type::DOUBLE:
-      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data());
+      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data(), null_to_nan);
       break;
     default:
       return Status::TypeError("DataType is not supported: ", result_type->ToString());
