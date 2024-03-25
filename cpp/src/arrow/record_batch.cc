@@ -308,7 +308,9 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
   // Check for no validity bitmap of each field
   for (int i = 0; i < num_columns(); ++i) {
     if (column(i)->null_count() > 0 && !null_to_nan) {
-      return Status::TypeError("Can only convert a RecordBatch with no nulls.");
+      return Status::TypeError(
+          "Can only convert a RecordBatch with no nulls. Set null_to_nan to true to "
+          "convert nulls to nan");
     }
   }
 
@@ -321,12 +323,12 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
   std::shared_ptr<Field> result_field = schema_->field(0);
   std::shared_ptr<DataType> result_type = result_field->type();
 
-  if (num_columns() > 1) {
-    Field::MergeOptions options;
-    options.promote_integer_to_float = true;
-    options.promote_integer_sign = true;
-    options.promote_numeric_width = true;
+  Field::MergeOptions options;
+  options.promote_integer_to_float = true;
+  options.promote_integer_sign = true;
+  options.promote_numeric_width = true;
 
+  if (num_columns() > 1) {
     for (int i = 1; i < num_columns(); ++i) {
       if (!is_numeric(column(i)->type()->id())) {
         return Status::TypeError("DataType is not supported: ",
@@ -336,6 +338,14 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
           result_field, result_field->MergeWith(
                             schema_->field(i)->WithName(result_field->name()), options));
     }
+    result_type = result_field->type();
+  }
+
+  // Check if result_type is signed or unsigned integer and null_to_nan is set to true
+  // Then all columns should be promoted to float type
+  if (is_integer(result_type->id()) && null_to_nan) {
+    ARROW_ASSIGN_OR_RAISE(result_field,
+                          result_field->MergeWith(field(result_field->name(), float16()), options));
     result_type = result_field->type();
   }
 
