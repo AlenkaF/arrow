@@ -248,7 +248,7 @@ Result<std::shared_ptr<StructArray>> RecordBatch::ToStructArray() const {
                                        /*offset=*/0);
 }
 
-#define TYPE_CASE(type)                                                \
+#define TYPE_CASE_COLUMN(type)                                         \
   case Type::type: {                                                   \
     using T = typename TypeIdTraits<Type::type>::Type;                 \
     using CType_in = typename TypeTraits<T>::CType;                    \
@@ -259,7 +259,7 @@ Result<std::shared_ptr<StructArray>> RecordBatch::ToStructArray() const {
     break;                                                             \
   }
 
-#define TYPE_CASE_NULL(type)                                                         \
+#define TYPE_CASE_COLUMN_NULL(type)                                                  \
   case Type::type: {                                                                 \
     using T = typename TypeIdTraits<Type::type>::Type;                               \
     using CType_in = typename TypeTraits<T>::CType;                                  \
@@ -270,11 +270,34 @@ Result<std::shared_ptr<StructArray>> RecordBatch::ToStructArray() const {
     }                                                                                \
     break;                                                                           \
   }
+
+#define TYPE_CASE_ROW(type)                                                       \
+  case Type::type: {                                                              \
+    using T = typename TypeIdTraits<Type::type>::Type;                            \
+    using CType_in = typename TypeTraits<T>::CType;                               \
+    auto* in_values = batch.column(i)->data()->GetValues<CType_in>(1);            \
+    for (int64_t j = 0; j < length; ++j) {                                        \
+      out_values[(j-1)*batch.num_columns()+i] = static_cast<CType>(*in_values++); \
+    }                                                                             \
+    break;                                                                        \
+  }
+
+#define TYPE_CASE_ROW_NULL(type)                                           \
+  case Type::type: {                                                       \
+    using T = typename TypeIdTraits<Type::type>::Type;                     \
+    using CType_in = typename TypeTraits<T>::CType;                        \
+    auto* in_values = batch.column(i) -> data() -> GetValues<CType_in>(1); \
+    for (int64_t j = 0; j < length; ++j) {                                 \
+      out_values[(j - 1) * batch.num_columns() + i] =                      \
+          batch.column(i)->IsNull(j) ? static_cast<CType>(NAN)             \
+                                     : static_cast<CType>(in_values[j]);   \
+    }                                                                      \
+    break;                                                                 \
   }
 
 template <typename DataType>
-inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
-                                   bool null_to_nan) {
+inline void ConvertColumnsToTensorColumnMajor(const RecordBatch& batch, uint8_t* out,
+                                              bool null_to_nan) {
   using CType = typename arrow::TypeTraits<DataType>::CType;
   auto* out_values = reinterpret_cast<CType*>(out);
   int64_t length = batch.num_rows();
@@ -300,16 +323,16 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
           }
           break;
         }
-          TYPE_CASE(UINT8)
-          TYPE_CASE(UINT16)
-          TYPE_CASE(UINT32)
-          TYPE_CASE(UINT64)
-          TYPE_CASE(INT8)
-          TYPE_CASE(INT16)
-          TYPE_CASE(INT32)
-          TYPE_CASE(INT64)
-          TYPE_CASE(FLOAT)
-          TYPE_CASE(DOUBLE)
+          TYPE_CASE_COLUMN(UINT8)
+          TYPE_CASE_COLUMN(UINT16)
+          TYPE_CASE_COLUMN(UINT32)
+          TYPE_CASE_COLUMN(UINT64)
+          TYPE_CASE_COLUMN(INT8)
+          TYPE_CASE_COLUMN(INT16)
+          TYPE_CASE_COLUMN(INT32)
+          TYPE_CASE_COLUMN(INT64)
+          TYPE_CASE_COLUMN(FLOAT)
+          TYPE_CASE_COLUMN(DOUBLE)
         default:
           break;
       }
@@ -326,16 +349,78 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
           }
           break;
         }
-          TYPE_CASE_NULL(UINT8)
-          TYPE_CASE_NULL(UINT16)
-          TYPE_CASE_NULL(UINT32)
-          TYPE_CASE_NULL(UINT64)
-          TYPE_CASE_NULL(INT8)
-          TYPE_CASE_NULL(INT16)
-          TYPE_CASE_NULL(INT32)
-          TYPE_CASE_NULL(INT64)
-          TYPE_CASE_NULL(FLOAT)
-          TYPE_CASE_NULL(DOUBLE)
+          TYPE_CASE_COLUMN_NULL(UINT8)
+          TYPE_CASE_COLUMN_NULL(UINT16)
+          TYPE_CASE_COLUMN_NULL(UINT32)
+          TYPE_CASE_COLUMN_NULL(UINT64)
+          TYPE_CASE_COLUMN_NULL(INT8)
+          TYPE_CASE_COLUMN_NULL(INT16)
+          TYPE_CASE_COLUMN_NULL(INT32)
+          TYPE_CASE_COLUMN_NULL(INT64)
+          TYPE_CASE_COLUMN_NULL(FLOAT)
+          TYPE_CASE_COLUMN_NULL(DOUBLE)
+        default:
+          break;
+      }
+    }
+  }
+}
+
+template <typename DataType>
+inline void ConvertColumnsToTensorRowMajor(const RecordBatch& batch, uint8_t* out,
+                                           bool null_to_nan) {
+  using CType = typename arrow::TypeTraits<DataType>::CType;
+  auto* out_values = reinterpret_cast<CType*>(out);
+  int64_t length = batch.num_rows();
+
+  for (int i = 0; i < batch.num_columns(); ++i) {
+    // Column has no missing values
+    if (batch.column(i)->null_count() == 0) {
+      switch (batch.column(i)->type_id()) {
+        case Type::HALF_FLOAT: {
+          auto* in_values = batch.column(i)->data()->GetValues<uint16_t>(1);
+          for (int64_t j = 0; j < length; ++j) {
+            out_values[(j - 1) * batch.num_columns() + i] =
+                static_cast<CType>(*in_values++);
+          }
+          break;
+        }
+          TYPE_CASE_ROW(UINT8)
+          TYPE_CASE_ROW(UINT16)
+          TYPE_CASE_ROW(UINT32)
+          TYPE_CASE_ROW(UINT64)
+          TYPE_CASE_ROW(INT8)
+          TYPE_CASE_ROW(INT16)
+          TYPE_CASE_ROW(INT32)
+          TYPE_CASE_ROW(INT64)
+          TYPE_CASE_ROW(FLOAT)
+          TYPE_CASE_ROW(DOUBLE)
+        default:
+          break;
+      }
+    }
+    // If the column is different type than resulting data type, has missing values
+    // and null_to_nan is set to true (checked in RecordBatch::ToTensor)
+    else {
+      switch (batch.column(i)->type_id()) {
+        case Type::HALF_FLOAT: {
+          auto* in_values = batch.column(i)->data()->GetValues<uint16_t>(1);
+          for (int64_t j = 0; j < length; ++j) {
+            *out_values++ = batch.column(i)->IsNull(j) ? static_cast<CType>(NAN)
+                                                       : static_cast<CType>(in_values[j]);
+          }
+          break;
+        }
+          TYPE_CASE_ROW_NULL(UINT8)
+          TYPE_CASE_ROW_NULL(UINT16)
+          TYPE_CASE_ROW_NULL(UINT32)
+          TYPE_CASE_ROW_NULL(UINT64)
+          TYPE_CASE_ROW_NULL(INT8)
+          TYPE_CASE_ROW_NULL(INT16)
+          TYPE_CASE_ROW_NULL(INT32)
+          TYPE_CASE_ROW_NULL(INT64)
+          TYPE_CASE_ROW_NULL(FLOAT)
+          TYPE_CASE_ROW_NULL(DOUBLE)
         default:
           break;
       }
@@ -344,8 +429,9 @@ inline void ConvertColumnsToTensor(const RecordBatch& batch, uint8_t* out,
 }
 
 #undef TYPE_CASE
+#undef TYPE_CASE_NULL
 
-Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
+Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan, bool row_major,
                                                       MemoryPool* pool) const {
   if (num_columns() == 0) {
     return Status::TypeError(
@@ -396,35 +482,65 @@ Result<std::shared_ptr<Tensor>> RecordBatch::ToTensor(bool null_to_nan,
   // Copy data
   switch (result_type->id()) {
     case Type::UINT8:
-      ConvertColumnsToTensor<UInt8Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<UInt8Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<UInt8Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT16:
     case Type::HALF_FLOAT:
-      ConvertColumnsToTensor<UInt16Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<UInt16Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<UInt16Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT32:
-      ConvertColumnsToTensor<UInt32Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<UInt32Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<UInt32Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::UINT64:
-      ConvertColumnsToTensor<UInt64Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<UInt64Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<UInt64Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT8:
-      ConvertColumnsToTensor<Int8Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<Int8Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<Int8Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT16:
-      ConvertColumnsToTensor<Int16Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<Int16Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<Int16Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT32:
-      ConvertColumnsToTensor<Int32Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<Int32Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<Int32Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::INT64:
-      ConvertColumnsToTensor<Int64Type>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<Int64Type>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<Int64Type>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::FLOAT:
-      ConvertColumnsToTensor<FloatType>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<FloatType>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<FloatType>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     case Type::DOUBLE:
-      ConvertColumnsToTensor<DoubleType>(*this, result->mutable_data(), null_to_nan);
+      row_major ? ConvertColumnsToTensorColumnMajor<DoubleType>(
+                      *this, result->mutable_data(), null_to_nan)
+                : ConvertColumnsToTensorColumnMajor<DoubleType>(
+                      *this, result->mutable_data(), null_to_nan);
       break;
     default:
       return Status::TypeError("DataType is not supported: ", result_type->ToString());
