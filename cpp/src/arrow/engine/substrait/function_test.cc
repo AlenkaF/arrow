@@ -603,7 +603,6 @@ std::shared_ptr<Table> GetOutputTableForAggregateCase(
 std::shared_ptr<acero::ExecPlan> PlanFromAggregateCase(
     const AggregateTestCase& test_case, std::shared_ptr<Table>* output_table,
     bool with_keys) {
-  static ExecContext ctx_for_ordered;
   std::shared_ptr<Table> input_table = GetInputTableForAggregateCase(test_case);
   std::vector<int> key_idxs = {};
   if (with_keys) {
@@ -636,7 +635,9 @@ std::shared_ptr<acero::ExecPlan> PlanFromAggregateCase(
           default_extension_id_registry(), /*ext_set_out=*/nullptr, conversion_options));
   std::shared_ptr<acero::ExecPlan> plan;
   if (test_case.ordered) {
-    EXPECT_OK_AND_ASSIGN(plan, acero::ExecPlan::Make(&ctx_for_ordered));
+    acero::QueryOptions options;
+    options.use_threads = false;
+    EXPECT_OK_AND_ASSIGN(plan, acero::ExecPlan::Make(options, *arrow::compute::threaded_exec_context()));
   } else {
     EXPECT_OK_AND_ASSIGN(plan, acero::ExecPlan::Make());
   }
